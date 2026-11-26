@@ -158,3 +158,80 @@ ps aux | grep yes
 ps aux | grep yes
 user        9104  0.0  0.0   9156  2320 pts/3    S+   18:23   0:00 grep --color=auto yes
 ```
+
+## Scenario 4: Permission Denied & Disk Exhaustion
+
+### Symptom
+A non-root user or automated script failed with `Permission denied` when attempting to read a restricted file/directory, and disk usage required auditing for potential block or inode exhaustion.
+
+### Diagnostic Commands
+
+Inspected ownership and permission bits on the restricted directory and file (`ls -ld` and `sudo ls -l`):
+```
+ ls -ld test-dir
+drwx------ 2 root root 4096 Nov 26 20:27 test-dir
+```
+```
+sudo ls -l test-dir
+total 0
+-rw------- 1 root root 0 Nov 26 20:27 test-file
+```
+Checked filesystem block usage (`df -h`) and inode usage (`df -i`) across mounted partitions:
+```
+df -h
+Filesystem      Size  Used Avail Use% Mounted on
+tmpfs           322M  5.1M  317M   2% /run
+/dev/sda2        24G   18G  5.2G  77% /
+tmpfs           1.6G     0  1.6G   0% /dev/shm
+tmpfs           5.0M  8.0K  5.0M   1% /run/lock
+efivarfs        256K  146K  106K  59% /sys/firmware/efi/efivars
+/dev/sdd        5.1G  5.8M  4.5G   1% /mnt/btrfs_data
+/dev/sdb        4.9G   24K  4.8G   1% /mnt/ext4_data
+/dev/sda1       1.1G  6.2M  1.1G   1% /boot/efi
+/dev/sdc        5.0G  130M  4.9G   3% /mnt/xfs_data
+tmpfs           322M  104K  322M   1% /run/user/120
+tmpfs           322M   92K  322M   1% /run/user/1000
+```
+```
+df -i
+Filesystem      Inodes  IUsed   IFree IUse% Mounted on
+tmpfs           411454   1315  410139    1% /run
+/dev/sda2      1569792 282872 1286920   19% /
+tmpfs           411454      1  411453    1% /dev/shm
+tmpfs           411454      4  411450    1% /run/lock
+efivarfs             0      0       0     - /sys/firmware/efi/efivars
+/dev/sdd             0      0       0     - /mnt/btrfs_data
+/dev/sdb        329312     11  329301    1% /mnt/ext4_data
+/dev/sda1            0      0       0     - /boot/efi
+/dev/sdc       2629760      3 2629757    1% /mnt/xfs_data
+tmpfs            82290    103   82187    1% /run/user/120
+tmpfs            82290    102   82188    1% /run/user/1000
+```
+
+Identified the largest directories inside `/var/log` using `du -sh /var/log/* 2>/dev/null | sort -hr | head -n 5`:
+
+```
+446M    /var/log/journal
+14M     /var/log/syslog.1
+3.7M    /var/log/kern.log.1
+1.5M    /var/log/installer
+1.4M    /var/log/sysstat
+```
+### Root Cause
+The target directory and file were owned by root:root with restrictive permissions (700 on the directory, 600 on the file), blocking non-root read and traversal access. On the storage side, `df -h` showed the root partition (`/dev/sda2`) at 77% disk usage (5.2 GB available) and `df -i` showed 19% inode usage (healthy, no exhaustion), while `du -sh` identified `/var/log/journal` (446 MB) as the largest log consumer.
+ 
+
+### Fix & Verification
+Transferred ownership to the operational user and applied least-privilege permissions (`chmod 750` on the directory so the owner/group can traverse it with `+x`, and `chmod 640` or `644` on the file—avoiding `chmod 777` so unauthorized users cannot modify or execute files):
+```
+sudo chown user:user test-dir test-dir/test-file
+chmod 750 test-dir
+chmod 644 test-dir/test-file
+```
+Verified updated permissions and confirmed the regular user can enter the directory and read the file without `sudo`:
+```
+ls -ld test-dir && ls -l test-dir && cat test-dir/test-file
+drwxr-x--- 2 user user 4096 Nov 26 20:27 test-dir
+total 0
+-rw-r--r-- 1 user user 0 Nov 26 20:27 test-file
+```
